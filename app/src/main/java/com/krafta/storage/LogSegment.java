@@ -1,6 +1,8 @@
 package com.krafta.storage;
 
 import java.io.*;
+import java.util.HashMap;
+import java.util.Map;
 
 public class LogSegment {
     private RandomAccessFile file;
@@ -9,6 +11,7 @@ public class LogSegment {
         this.file = new RandomAccessFile(path, "rw");
         this.currOffset = 0;
     }
+    public Map<Long,Long> offsetToFilePos = new HashMap<>();
     public synchronized long append(String message) throws IOException {
         long newOffset = currOffset + 1;
         currOffset = newOffset;
@@ -22,6 +25,7 @@ public class LogSegment {
         byte[] data = serialize(msg);
 
         long fileOffset = file.length();
+        offsetToFilePos.put(newOffset,fileOffset);
         file.seek(fileOffset);
         file.write(data);
 
@@ -38,6 +42,13 @@ public class LogSegment {
         file.readFully(buffer);
 
         return deserialize(buffer);
+    }
+    public Message readByOffset(long offset) throws IOException{
+        Long filePos = offsetToFilePos.get(offset);
+        if(filePos==null){
+            throw new RuntimeException("Offset not found");
+        }
+        return read(filePos);
     }
 
     private byte[] serialize(Message msg) throws IOException {
