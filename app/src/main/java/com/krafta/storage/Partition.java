@@ -18,4 +18,7 @@ public class Partition {
     public long append(String message) throws IOException {
         return segment.append(message);
     }
+    public Message read(long offset) throws Exception{
+        return segment.readByOffset(offset);
+    }
 }
