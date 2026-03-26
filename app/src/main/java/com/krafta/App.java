@@ -3,6 +3,7 @@
  */
 package com.krafta;
 
+import com.krafta.consumer.Consumer;
 import com.krafta.storage.Partition;
 
 import java.io.IOException;
@@ -17,5 +18,11 @@ public class App {
         long offset2 = partition.append("Second message");
 
         System.out.println("Written offsets: " + offset1 + ", " + offset2);
+        Consumer consumer = new Consumer(partition);
+        try {
+            consumer.poll(5);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }
