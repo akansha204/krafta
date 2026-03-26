@@ -4,6 +4,7 @@
 package com.krafta;
 
 import com.krafta.consumer.Consumer;
+import com.krafta.producer.Producer;
 import com.krafta.storage.Partition;
 
 import java.io.IOException;
@@ -14,8 +15,10 @@ public class App {
 //        String root = System.getProperty("user.dir");
         Partition partition = new Partition( "../data");
 
-        long offset1 = partition.append("Hello Kafka");
-        long offset2 = partition.append("Second message");
+        Producer producer = new Producer(partition);
+        long offset1 = producer.send("Hello from producer");
+        long offset2 = producer.send("Welcome to Kafka!");
+
 
         System.out.println("Written offsets: " + offset1 + ", " + offset2);
         Consumer consumer = new Consumer(partition);
