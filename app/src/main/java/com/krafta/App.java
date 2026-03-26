@@ -3,29 +3,64 @@
  */
 package com.krafta;
 
+import com.krafta.broker.Broker;
 import com.krafta.consumer.Consumer;
+import com.krafta.exceptions.TopicAlreadyExistsException;
+import com.krafta.exceptions.TopicNotFoundException;
 import com.krafta.producer.Producer;
+import com.krafta.storage.Message;
 import com.krafta.storage.Partition;
 
 import java.io.IOException;
+import java.util.List;
 
 public class App {
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws TopicNotFoundException, TopicAlreadyExistsException,IOException {
+        Broker broker = new Broker();
+        broker.createTopic("orders");
+        broker.createTopic("events");
 //        String root = System.getProperty("user.dir");
-        Partition partition = new Partition( "../data");
+//        Partition partition = new Partition( "../data");
 
-        Producer producer = new Producer(partition);
-        long offset1 = producer.send("Hello from producer");
-        long offset2 = producer.send("Welcome to Kafka!");
+        broker.send("orders","msg0 of orders topic");
+        broker.send("orders","msg1 of orders topic");
+        broker.send("events","msg0 of events topic");
+        broker.send("events","msg1 of events topic");
+//        Producer producer = new Producer(partition);
+//        long offset1 = broker.send("orders","orders topic msg1");
+//        long offset2 = producer.send("Welcome to Kafka!");
 
 
-        System.out.println("Written offsets: " + offset1 + ", " + offset2);
-        Consumer consumer = new Consumer(partition);
-        try {
-            consumer.poll(5);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+//        System.out.println("Written offsets: " + offset1 + ", " + offset2);
+//        Consumer consumer = new Consumer(partition);
+//        try {
+//            consumer.poll(5);
+//        } catch (Exception e) {
+//            throw new RuntimeException(e);
+//        }
+
+        //--consuming messages from order topic --
+        List<Message> ordersMessages = broker.consume("orders", 1, 10);
+        System.out.println("Orders consumed: " + ordersMessages.size());
+        for(Message msg : ordersMessages) {
+            System.out.println("  → " + new String(msg.payload));
         }
+        System.out.println();
+
+        //--consuming messages from events topic--
+        List<Message> EventsMessages = broker.consume("events", 1, 10);
+        System.out.println("Events consumed: " + EventsMessages.size());
+        for(Message msg : EventsMessages) {
+            System.out.println("  → " + new String(msg.payload));
+        }
+        System.out.println();
+
+
+        // ============= OPTIONAL: Direct Partition Access =============
+//        System.out.println("--- Direct Partition Access ---");
+//        Partition ordersTopic = broker.topics.get("orders");
+//        Message msg = ordersTopic.read(2);
+//        System.out.println("Message at offset 2: " + new String(msg.payload));
     }
 }
