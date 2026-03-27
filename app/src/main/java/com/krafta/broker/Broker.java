@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 public class Broker {
-    public Map<String, Partition> topics = new HashMap<>();
+    private Map<String, Partition> topics = new HashMap<>();
     public void createTopic(String topicName) throws TopicAlreadyExistsException, IOException {
         if (topics.containsKey(topicName)) {
             throw new TopicAlreadyExistsException("Topic already exists");
