@@ -18,8 +18,8 @@ public class App {
 
     public static void main(String[] args) throws TopicNotFoundException, TopicAlreadyExistsException,IOException {
         Broker broker = new Broker();
-        broker.createTopic("orders");
-        broker.createTopic("events");
+        broker.createTopic("orders",3);
+        broker.createTopic("events",3);
 //        String root = System.getProperty("user.dir");
 //        Partition partition = new Partition( "../data");
 
@@ -32,29 +32,22 @@ public class App {
 //        long offset2 = producer.send("Welcome to Kafka!");
 
 
-//        System.out.println("Written offsets: " + offset1 + ", " + offset2);
-//        Consumer consumer = new Consumer(partition);
-//        try {
-//            consumer.poll(5);
-//        } catch (Exception e) {
-//            throw new RuntimeException(e);
-//        }
-
-        //--consuming messages from order topic --
-        List<Message> ordersMessages = broker.consume("orders", 1, 10);
-        System.out.println("Orders consumed: " + ordersMessages.size());
-        for(Message msg : ordersMessages) {
-            System.out.println("  → " + new String(msg.payload));
+        List<Partition> ordersPartitions = broker.getPartitions("orders");
+        Consumer ordersconsumer = new Consumer("orders",ordersPartitions);
+        try {
+            ordersconsumer.poll(5);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
-        System.out.println();
 
-        //--consuming messages from events topic--
-        List<Message> EventsMessages = broker.consume("events", 1, 10);
-        System.out.println("Events consumed: " + EventsMessages.size());
-        for(Message msg : EventsMessages) {
-            System.out.println("  → " + new String(msg.payload));
+        List<Partition> eventsPartitions = broker.getPartitions("events");
+        Consumer eventsconsumer = new Consumer("events",eventsPartitions);
+        try {
+            eventsconsumer.poll(5);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
-        System.out.println();
+
 
 
         // ============= OPTIONAL: Direct Partition Access =============
