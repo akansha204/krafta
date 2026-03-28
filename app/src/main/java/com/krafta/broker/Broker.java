@@ -40,20 +40,11 @@ public class Broker {
         nextPartitionIndex.put(topicName, nextidx);
 
     }
-    public List<Message> consume(String topic, long offset, long maxMessages) throws TopicNotFoundException, IOException {
-        if(!topics.containsKey(topic)){
+    public List<Partition> getPartitions(String topic) throws TopicNotFoundException {
+        if (!topics.containsKey(topic)) {
             throw new TopicNotFoundException("Topic not found");
         }
-        List<Message> messages = new ArrayList<>();
-        for(int i=0;i<maxMessages;i++){
-            try{
-                Message msg = topics.get(topic).read(offset);
-                messages.add(msg);
-                offset++;
-            } catch (Exception e) {
-                break;
-            }
-        }
-        return messages;
+        return topics.get(topic);
     }
+
 }
