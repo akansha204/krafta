@@ -38,4 +38,16 @@ public class Consumer {
             partitionoffset.put(p,curroffset);
         }
     }
+    public void addPartition(Partition p) {
+        if (!partitionList.contains(p)) {
+            partitionList.add(p);
+            partitionoffset.put(p, 1L);
+        }
+    }
+
+    public void clearAssignments() {
+        partitionList.clear();
+        partitionoffset.clear();
+    }
+
 }

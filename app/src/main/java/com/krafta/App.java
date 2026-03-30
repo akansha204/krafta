@@ -5,6 +5,7 @@ package com.krafta;
 
 import com.krafta.broker.Broker;
 import com.krafta.consumer.Consumer;
+import com.krafta.consumer.ConsumerGroup;
 import com.krafta.exceptions.TopicAlreadyExistsException;
 import com.krafta.exceptions.TopicNotFoundException;
 import com.krafta.producer.Producer;
@@ -12,11 +13,13 @@ import com.krafta.storage.Message;
 import com.krafta.storage.Partition;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class App {
 
-    public static void main(String[] args) throws TopicNotFoundException, TopicAlreadyExistsException,IOException {
+    public static void main(String[] args) throws Exception {
         Broker broker = new Broker();
         broker.createTopic("orders",3);
         broker.createTopic("events",3);
@@ -32,28 +35,37 @@ public class App {
 //        long offset2 = producer.send("Welcome to Kafka!");
 
 
+//        List<Partition> ordersPartitions = broker.getPartitions("orders");
+//        Consumer ordersconsumer = new Consumer("orders",ordersPartitions);
+//        try {
+//            ordersconsumer.poll(5);
+//        } catch (Exception e) {
+//            throw new RuntimeException(e);
+//        }
+//
+//        List<Partition> eventsPartitions = broker.getPartitions("events");
+//        Consumer eventsconsumer = new Consumer("events",eventsPartitions);
+//        try {
+//            eventsconsumer.poll(5);
+//        } catch (Exception e) {
+//            throw new RuntimeException(e);
+//        }
+
+        Consumer consumer1 = new Consumer("orders", new ArrayList<>());
+        Consumer consumer2 = new Consumer("orders", new ArrayList<>());
+        Consumer consumer3 = new Consumer("orders", new ArrayList<>());
+
+        List<Consumer> consumers = Arrays.asList(consumer1, consumer2, consumer3);
+        ConsumerGroup group = new ConsumerGroup("order-group1",consumers,null);
+
         List<Partition> ordersPartitions = broker.getPartitions("orders");
-        Consumer ordersconsumer = new Consumer("orders",ordersPartitions);
-        try {
-            ordersconsumer.poll(5);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        group.setPartitionAssignment(ordersPartitions);
 
-        List<Partition> eventsPartitions = broker.getPartitions("events");
-        Consumer eventsconsumer = new Consumer("events",eventsPartitions);
-        try {
-            eventsconsumer.poll(5);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        consumer1.poll(10);
+        consumer2.poll(10);
+        consumer3.poll(10);
 
 
 
-        // ============= OPTIONAL: Direct Partition Access =============
-//        System.out.println("--- Direct Partition Access ---");
-//        Partition ordersTopic = broker.topics.get("orders");
-//        Message msg = ordersTopic.read(2);
-//        System.out.println("Message at offset 2: " + new String(msg.payload));
     }
 }
