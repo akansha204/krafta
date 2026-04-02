@@ -1,6 +1,6 @@
 package com.krafta.consumer;
 
-import com.krafta.storage.Message;
+import com.krafta.storage.Record;
 import com.krafta.storage.Partition;
 
 import java.util.HashMap;
@@ -26,7 +26,7 @@ public class Consumer {
             long curroffset = partitionoffset.get(p);
             for(int i=0;i<maxMessages;i++){
                 try {
-                    Message msg = p.read(curroffset);
+                    Record msg = p.read(curroffset);
                     if (msg == null) break;
 
                     System.out.println("Consumed: " + "Partition" + p + "Offset" + curroffset + "->" + new String(msg.payload));

@@ -6,13 +6,10 @@ package com.krafta;
 import com.krafta.broker.Broker;
 import com.krafta.consumer.Consumer;
 import com.krafta.consumer.ConsumerGroup;
-import com.krafta.exceptions.TopicAlreadyExistsException;
-import com.krafta.exceptions.TopicNotFoundException;
-import com.krafta.producer.Producer;
-import com.krafta.storage.Message;
 import com.krafta.storage.Partition;
+import com.krafta.storage.Record;
+import com.krafta.storage.RecordBatch;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -26,44 +23,74 @@ public class App {
 //        String root = System.getProperty("user.dir");
 //        Partition partition = new Partition( "../data");
 
-        broker.send("orders","msg0 of orders topic");
-        broker.send("orders","msg1 of orders topic");
-        broker.send("events","msg0 of events topic");
-        broker.send("events","msg1 of events topic");
-//        Producer producer = new Producer(partition);
-//        long offset1 = broker.send("orders","orders topic msg1");
-//        long offset2 = producer.send("Welcome to Kafka!");
+        long orderoffset1 = broker.send("orders","msg0 of orders topic");
+        long orderoffset2 = broker.send("orders","msg1 of orders topic");
+        long eventoffset1 = broker.send("events","msg0 of events topic");
+        long eventoffset2 = broker.send("events","msg1 of events topic");
+
+        System.out.println("Produced offsets of order topic :" + orderoffset1 + " " + orderoffset2);
+        System.out.println("Produced offsets of event topic :" + eventoffset1 + " " + eventoffset2);
 
 
-//        List<Partition> ordersPartitions = broker.getPartitions("orders");
-//        Consumer ordersconsumer = new Consumer("orders",ordersPartitions);
-//        try {
-//            ordersconsumer.poll(5);
-//        } catch (Exception e) {
-//            throw new RuntimeException(e);
-//        }
+        Partition orderP0 = broker.getPartitions("orders").get(0);
+        Partition orderP1 = broker.getPartitions("orders").get(1);
+        Record r1 = orderP0.read(1);
+        Record r2 = orderP1.read(1);
+
+
+        System.out.println("orders p0 offset 1 => " + new String(r1.payload));
+        System.out.println("orders p1 offset 1 => " + new String(r2.payload));
+
+        Partition eventP0 = broker.getPartitions("events").get(0);
+        Partition eventP1 = broker.getPartitions("events").get(1);
+        Record r3 = eventP0.read(1);
+        Record r4 = eventP1.read(1);
+
+
+        System.out.println("events p0 offset 1 => " + new String(r3.payload));
+        System.out.println("events p1 offset 1 => " + new String(r4.payload));
+
+
+        RecordBatch batch = new RecordBatch(-1, List.of(
+                new Record(-1, System.currentTimeMillis(), "batch msg1".getBytes()),
+                new Record(-1, System.currentTimeMillis(), "batch msg2".getBytes()),
+                new Record(-1, System.currentTimeMillis(), "batch msg3".getBytes())
+        ));
+
+        long orderBatchLastOffset = orderP0.append(batch);
+        System.out.println("orders p0 batch last offset => " + orderBatchLastOffset);
+
+        Record orderBatchR1 = orderP0.read(2);
+        Record orderBatchR2 = orderP0.read(3);
+        Record orderBatchR3 = orderP0.read(4);
+        System.out.println("orders p0 offset 2 => " + new String(orderBatchR1.payload));
+        System.out.println("orders p0 offset 3 => " + new String(orderBatchR2.payload));
+        System.out.println("orders p0 offset 4 => " + new String(orderBatchR3.payload));
+
+        long eventBatchLastOffset = eventP0.append(batch);
+        System.out.println("events p0 batch last offset => " + eventBatchLastOffset);
+
+        Record eventBatchR1 = eventP0.read(2);
+        Record eventBatchR2 = eventP0.read(3);
+        Record eventBatchR3 = eventP0.read(4);
+        System.out.println("events p0 offset 2 => " + new String(eventBatchR1.payload));
+        System.out.println("events p0 offset 3 => " + new String(eventBatchR2.payload));
+        System.out.println("events p0 offset 4 => " + new String(eventBatchR3.payload));
+
+
+//        Consumer consumer1 = new Consumer("orders", new ArrayList<>());
+//        Consumer consumer2 = new Consumer("orders", new ArrayList<>());
+//        Consumer consumer3 = new Consumer("orders", new ArrayList<>());
 //
-//        List<Partition> eventsPartitions = broker.getPartitions("events");
-//        Consumer eventsconsumer = new Consumer("events",eventsPartitions);
-//        try {
-//            eventsconsumer.poll(5);
-//        } catch (Exception e) {
-//            throw new RuntimeException(e);
-//        }
-
-        Consumer consumer1 = new Consumer("orders", new ArrayList<>());
-        Consumer consumer2 = new Consumer("orders", new ArrayList<>());
-        Consumer consumer3 = new Consumer("orders", new ArrayList<>());
-
-        List<Consumer> consumers = Arrays.asList(consumer1, consumer2, consumer3);
-        ConsumerGroup group = new ConsumerGroup("order-group1",consumers,null);
-
-        List<Partition> ordersPartitions = broker.getPartitions("orders");
-        group.setPartitionAssignment(ordersPartitions);
-
-        consumer1.poll(10);
-        consumer2.poll(10);
-        consumer3.poll(10);
+//        List<Consumer> consumers = Arrays.asList(consumer1, consumer2, consumer3);
+//        ConsumerGroup group = new ConsumerGroup("order-group1",consumers,null);
+//
+//        List<Partition> ordersPartitions = broker.getPartitions("orders");
+//        group.setPartitionAssignment(ordersPartitions);
+//
+//        consumer1.poll(10);
+//        consumer2.poll(10);
+//        consumer3.poll(10);
 
 
 
