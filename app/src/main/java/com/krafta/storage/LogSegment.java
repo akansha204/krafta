@@ -1,78 +1,73 @@
 package com.krafta.storage;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static java.util.Collections.binarySearch;
 
 public class LogSegment {
     private static final int INDEX_INTERVAL = 100;
     private int messageSinceLastIdx = 0;
-    private RandomAccessFile idxfile;
-    private List<Long> indexedOffsets = new ArrayList<>();
-    private List<Long> indexedFilePositions = new ArrayList<>();
+    private final RandomAccessFile idxfile;
+    private final List<Long> indexedOffsets = new ArrayList<>();
+    private final List<Long> indexedFilePositions = new ArrayList<>();
 
-    private RandomAccessFile file;
+    private final RandomAccessFile file;
     private long currOffset;
+
     public LogSegment(String path) throws IOException {
         this.file = new RandomAccessFile(path, "rw");
         this.idxfile = new RandomAccessFile(path.replace(".log", ".idx"), "rw");
         this.currOffset = 0;
-        try {
-            loadIndex(); //will load the sparse index file to memory after a restart
-            if(!indexedOffsets.isEmpty()){
-                long lastidxoffset = indexedOffsets.get(indexedOffsets.size()-1);
-                messageSinceLastIdx = (int) ((currOffset-lastidxoffset) % INDEX_INTERVAL);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        recover();
     }
-//    public Map<Long,Long> offsetToFilePos = new HashMap<>();
-    public synchronized long append(String message) throws IOException {
-        long newOffset = currOffset + 1;
-        currOffset = newOffset;
 
-        Message msg = new Message(
-                newOffset,
-                System.currentTimeMillis(),
-                message.getBytes()
-        );
+    public synchronized long appendBatch(RecordBatch incomingBatch) throws IOException {
+        List<Record> records = new ArrayList<>(incomingBatch.getRecords().size());
+        long nextOffset = currOffset + 1;
+        for (Record record : incomingBatch.getRecords()) {
+            record.offset = nextOffset++;
+            if (record.timestamp <= 0) {
+                record.timestamp = System.currentTimeMillis();
+            }
+            records.add(record);
+        }
 
-        byte[] data = serialize(msg);
+        RecordBatch batch = new RecordBatch(currOffset + 1, records);
+        long newOffset = currOffset + batch.getRecords().size();
 
+        byte[] data = serializeBatch(batch);
         long fileOffset = file.length();
         file.seek(fileOffset);
         file.write(data);
-        messageSinceLastIdx++;
-        if(newOffset == 1 || messageSinceLastIdx >= INDEX_INTERVAL){
-            writeIdxEntry(newOffset, fileOffset);
+
+        currOffset = newOffset;
+        messageSinceLastIdx += batch.getRecords().size();
+
+        if (currOffset == batch.getRecords().size() || messageSinceLastIdx >= INDEX_INTERVAL) {
+            writeIdxEntry(currOffset, fileOffset);
             messageSinceLastIdx = 0;
         }
-//        offsetToFilePos.put(newOffset,fileOffset);
 
         return newOffset;
     }
 
-    private void writeIdxEntry(long offset, long filepos) throws IOException{
-        idxfile.seek((idxfile.length()));
+    private void writeIdxEntry(long offset, long filepos) throws IOException {
+        idxfile.seek(idxfile.length());
         idxfile.writeLong(offset);
         idxfile.writeLong(filepos);
-    }
-    private void loadIndex() throws Exception{
-        idxfile.seek(0);
-        while(idxfile.getFilePointer() < idxfile.length()) {
-            long offset = idxfile.readLong();
-            long filepos = idxfile.readLong();
-            indexedOffsets.add(offset);
-            indexedFilePositions.add(filepos);
-        }
+        indexedOffsets.add(offset);
+        indexedFilePositions.add(filepos);
     }
 
-    public Message read(long fileOffset) throws IOException {
+    public synchronized Record read(long fileOffset) throws IOException {
         file.seek(fileOffset);
 
         int length = file.readInt();
@@ -83,31 +78,77 @@ public class LogSegment {
 
         return deserialize(buffer);
     }
-    public Message readByOffset(long offset) throws IOException{
+
+    public synchronized Record readByOffset(long offset) throws IOException {
         int idx = binarySearch(indexedOffsets, offset);
-        if(idx<0){
-            idx = -idx - 2; //find the largest offset smaller than the requested offset
+        if (idx < 0) {
+            idx = -idx - 2;
         }
-        long startPos;
-        if(idx < 0){
-            startPos = 0;
-        } else{
-            startPos = indexedFilePositions.get(idx);
-        }
+
+        long startPos = idx < 0 ? 0 : indexedFilePositions.get(idx);
         file.seek(startPos);
 
-       while(file.getFilePointer() < file.length()){
-           long currPos = file.getFilePointer();
-           Message msg = read(currPos);
-           if(msg.offset == offset) return msg;
-           if(msg.offset > offset) break;
-           file.seek(currPos + 4 + 8 + 8 + msg.payload.length);
-       }
-       throw new RuntimeException("Offset not found");
+        while (file.getFilePointer() < file.length()) {
+            long currPos = file.getFilePointer();
+            RecordBatch batch = deserializeBatch(currPos);
+            for (Record record : batch.getRecords()) {
+                if (record.offset == offset) {
+                    return record;
+                }
+                if (record.offset > offset) {
+                    break;
+                }
+            }
+            file.seek(currPos + calculateBatchSize(batch));
+        }
+
+        throw new RuntimeException("Offset not found");
     }
 
-    private byte[] serialize(Message msg) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream(); //writes to in-memory byte[] buffer
+    private void recover() throws IOException {
+        indexedOffsets.clear();
+        indexedFilePositions.clear();
+        idxfile.setLength(0);
+
+        long scanPos = 0;
+        long recoveredOffset = 0;
+        int recoveredMessagesSinceLastIndex = 0;
+
+        while (scanPos < file.length()) {
+            try {
+                RecordBatch batch = deserializeBatch(scanPos);
+                long batchSize = calculateBatchSize(batch);
+                long batchEndOffset = batch.getBaseOffset() + batch.getRecords().size() - 1;
+
+                recoveredOffset = Math.max(recoveredOffset, batchEndOffset);
+                recoveredMessagesSinceLastIndex += batch.getRecords().size();
+
+                if (batchEndOffset == batch.getRecords().size() || recoveredMessagesSinceLastIndex >= INDEX_INTERVAL) {
+                    writeIdxEntry(batchEndOffset, scanPos);
+                    recoveredMessagesSinceLastIndex = 0;
+                }
+
+                scanPos += batchSize;
+            } catch (IOException e) {
+                file.setLength(scanPos);
+                break;
+            }
+        }
+
+        currOffset = recoveredOffset;
+        messageSinceLastIdx = recoveredMessagesSinceLastIndex;
+    }
+
+    private long calculateBatchSize(RecordBatch batch) {
+        long size = 8 + 4 + 8;
+        for (Record record : batch.getRecords()) {
+            size += 4 + 8 + 8 + record.payload.length;
+        }
+        return size;
+    }
+
+    private byte[] serialize(Record msg) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
 
         int totalLength = 8 + 8 + msg.payload.length;
@@ -120,8 +161,8 @@ public class LogSegment {
         return baos.toByteArray();
     }
 
-    private Message deserialize(byte[] data) throws IOException {
-        ByteArrayInputStream bais = new ByteArrayInputStream(data); //reads from in-memory byte[] buffer
+    private Record deserialize(byte[] data) throws IOException {
+        ByteArrayInputStream bais = new ByteArrayInputStream(data);
         DataInputStream dis = new DataInputStream(bais);
 
         int length = dis.readInt();
@@ -131,7 +172,61 @@ public class LogSegment {
         byte[] payload = new byte[length - 16];
         dis.readFully(payload);
 
-        return new Message(offset, timestamp, payload);
+        return new Record(offset, timestamp, payload);
     }
 
+    public byte[] serializeBatch(RecordBatch batch) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+
+        List<Record> records = batch.getRecords();
+        try {
+            dos.writeLong(batch.getBaseOffset());
+            dos.writeInt(records.size());
+
+            for (Record r : records) {
+                byte[] recorData = serialize(r);
+                dos.write(recorData);
+            }
+            dos.writeLong(batch.getCrc());
+            dos.flush();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return baos.toByteArray();
+    }
+
+    public RecordBatch deserializeBatch(long fileOffset) throws IOException {
+        try {
+            file.seek(fileOffset);
+
+            long baseOffset = file.readLong();
+            int recordCount = file.readInt();
+            if (recordCount <= 0) {
+                throw new IOException("Invalid record count: " + recordCount);
+            }
+
+            List<Record> records = new ArrayList<>();
+            for (int i = 0; i < recordCount; i++) {
+                int length = file.readInt();
+                if (length < 16) {
+                    throw new IOException("Invalid record length: " + length);
+                }
+
+                byte[] buffer = new byte[4 + length];
+                file.seek(file.getFilePointer() - 4);
+                file.readFully(buffer);
+                records.add(deserialize(buffer));
+            }
+
+            long storedCrc = file.readLong();
+            RecordBatch batch = new RecordBatch(baseOffset, records);
+            if (batch.getCrc() != storedCrc) {
+                throw new IOException("Batch corrupted: CRC mismatch at offset " + baseOffset);
+            }
+            return batch;
+        } catch (EOFException e) {
+            throw new IOException("Partial batch at fileOffset " + fileOffset, e);
+        }
+    }
 }
