@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
@@ -15,6 +16,10 @@ import static java.util.Collections.binarySearch;
 public class LogSegment {
     private static final int INDEX_INTERVAL = 100;
     private int messageSinceLastIdx = 0;
+    private final long baseOffset;
+    private final File logFile;
+    private final File indexFile;
+    private final long createdAtMs;
     private final RandomAccessFile idxfile;
     private final List<Long> indexedOffsets = new ArrayList<>();
     private final List<Long> indexedFilePositions = new ArrayList<>();
@@ -23,9 +28,17 @@ public class LogSegment {
     private long currOffset;
 
     public LogSegment(String path) throws IOException {
-        this.file = new RandomAccessFile(path, "rw");
-        this.idxfile = new RandomAccessFile(path.replace(".log", ".idx"), "rw");
+        this(new File(path));
+    }
+
+    public LogSegment(File logFile) throws IOException {
+        this.logFile = logFile;
+        this.indexFile = new File(toIndexPath(logFile));
+        this.baseOffset = parseBaseOffset(logFile.getName());
+        this.file = new RandomAccessFile(logFile, "rw");
+        this.idxfile = new RandomAccessFile(indexFile, "rw");
         this.currOffset = 0;
+        this.createdAtMs = resolveCreatedAtMs();
         recover();
     }
 
@@ -176,6 +189,10 @@ public class LogSegment {
         return currOffset;
     }
 
+    public long getBaseOffset() {
+        return baseOffset;
+    }
+
     public synchronized long getEarliestOffset() throws IOException {
         if (currOffset == 0 || file.length() == 0) {
             return 0;
@@ -183,6 +200,58 @@ public class LogSegment {
 
         RecordBatch firstBatch = deserializeBatch(0);
         return firstBatch.getBaseOffset();
+    }
+
+    public synchronized long sizeBytes() throws IOException {
+        return file.length();
+    }
+
+    public long createdAtMs() {
+        return createdAtMs;
+    }
+
+    public long lastModifiedMs() {
+        return logFile.lastModified();
+    }
+
+    public synchronized boolean shouldRollBySize(long maxSegmentBytes) throws IOException {
+        return maxSegmentBytes > 0 && file.length() >= maxSegmentBytes;
+    }
+
+    public boolean shouldRollByAge(long maxSegmentAgeMs, long nowMs) {
+        return maxSegmentAgeMs > 0 && nowMs - createdAtMs >= maxSegmentAgeMs;
+    }
+
+    public boolean isExpiredForRetention(long retentionMs, long nowMs) {
+        return retentionMs > 0 && nowMs - lastModifiedMs() >= retentionMs;
+    }
+
+    public synchronized void close() throws IOException {
+        idxfile.close();
+        file.close();
+    }
+
+    public synchronized void delete() throws IOException {
+        close();
+
+        if (logFile.exists() && !logFile.delete()) {
+            throw new IOException("Failed to delete log file: " + logFile.getPath());
+        }
+        if (indexFile.exists() && !indexFile.delete()) {
+            throw new IOException("Failed to delete index file: " + indexFile.getPath());
+        }
+    }
+
+    public static String segmentFileName(long baseOffset, String extension) {
+        return String.format("%020d.%s", baseOffset, extension);
+    }
+
+    public static File logFile(File directory, long baseOffset) {
+        return new File(directory, segmentFileName(baseOffset, "log"));
+    }
+
+    public static File indexFile(File directory, long baseOffset) {
+        return new File(directory, segmentFileName(baseOffset, "idx"));
     }
 
     private long calculateBatchSize(RecordBatch batch) {
@@ -274,5 +343,32 @@ public class LogSegment {
         } catch (EOFException e) {
             throw new IOException("Partial batch at fileOffset " + fileOffset, e);
         }
+    }
+
+    private long resolveCreatedAtMs() {
+        long lastModified = logFile.lastModified();
+        return lastModified > 0 ? lastModified : System.currentTimeMillis();
+    }
+
+    private static long parseBaseOffset(String fileName) {
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex <= 0) {
+            return 0;
+        }
+
+        String prefix = fileName.substring(0, dotIndex);
+        try {
+            return Long.parseLong(prefix);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    private static String toIndexPath(File logFile) {
+        String logPath = logFile.getPath();
+        if (logPath.endsWith(".log")) {
+            return logPath.substring(0, logPath.length() - 4) + ".idx";
+        }
+        return logPath + ".idx";
     }
 }
