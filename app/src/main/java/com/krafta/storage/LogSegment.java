@@ -105,6 +105,39 @@ public class LogSegment {
         throw new RuntimeException("Offset not found");
     }
 
+    public synchronized List<Record> readFromOffset(long offset, int maxRecords) throws IOException {
+        List<Record> result = new ArrayList<>();
+        if (offset <= 0 || maxRecords <= 0) {
+            return result;
+        }
+
+        int idx = binarySearch(indexedOffsets, offset);
+        if (idx < 0) {
+            idx = -idx - 2;
+        }
+
+        long startPos = idx < 0 ? 0 : indexedFilePositions.get(idx);
+        file.seek(startPos);
+
+        while (file.getFilePointer() < file.length() && result.size() < maxRecords) {
+            long currPos = file.getFilePointer();
+            RecordBatch batch = deserializeBatch(currPos);
+
+            for (Record record : batch.getRecords()) {
+                if (record.offset >= offset) {
+                    result.add(record);
+                    if (result.size() == maxRecords) {
+                        break;
+                    }
+                }
+            }
+
+            file.seek(currPos + calculateBatchSize(batch));
+        }
+
+        return result;
+    }
+
     private void recover() throws IOException {
         indexedOffsets.clear();
         indexedFilePositions.clear();
@@ -137,6 +170,19 @@ public class LogSegment {
 
         currOffset = recoveredOffset;
         messageSinceLastIdx = recoveredMessagesSinceLastIndex;
+    }
+
+    public synchronized long getLatestOffset() {
+        return currOffset;
+    }
+
+    public synchronized long getEarliestOffset() throws IOException {
+        if (currOffset == 0 || file.length() == 0) {
+            return 0;
+        }
+
+        RecordBatch firstBatch = deserializeBatch(0);
+        return firstBatch.getBaseOffset();
     }
 
     private long calculateBatchSize(RecordBatch batch) {
