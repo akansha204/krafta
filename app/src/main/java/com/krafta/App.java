@@ -3,96 +3,106 @@
  */
 package com.krafta;
 
+import com.krafta.api.FetchRequest;
+import com.krafta.api.FetchResponse;
+import com.krafta.api.ListOffsetsRequest;
+import com.krafta.api.ListOffsetsResponse;
+import com.krafta.api.ProduceRequest;
+import com.krafta.api.ProduceResponse;
 import com.krafta.broker.Broker;
 import com.krafta.consumer.Consumer;
-import com.krafta.consumer.ConsumerGroup;
-import com.krafta.storage.Partition;
+import com.krafta.producer.Producer;
 import com.krafta.storage.Record;
-import com.krafta.storage.RecordBatch;
 
-import java.util.ArrayList;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 public class App {
 
     public static void main(String[] args) throws Exception {
-        Broker broker = new Broker();
-        broker.createTopic("orders",3);
-        broker.createTopic("events",3);
-//        String root = System.getProperty("user.dir");
-//        Partition partition = new Partition( "../data");
+        String dataRoot = "../data";
+        Broker broker = new Broker(dataRoot);
+        Producer producer = new Producer(broker);
 
-        long orderoffset1 = broker.send("orders","msg0 of orders topic");
-        long orderoffset2 = broker.send("orders","msg1 of orders topic");
-        long eventoffset1 = broker.send("events","msg0 of events topic");
-        long eventoffset2 = broker.send("events","msg1 of events topic");
+        try {
+            broker.createTopic("orders", 3);
+        } catch (Exception ignored) {
+        }
 
-        System.out.println("Produced offsets of order topic :" + orderoffset1 + " " + orderoffset2);
-        System.out.println("Produced offsets of event topic :" + eventoffset1 + " " + eventoffset2);
+        ProduceResponse partition0Batch = producer.sendBatch(
+                "orders",
+                0,
+                List.of("p0-order-1", "p0-order-2", "p0-order-3")
+        );
+        ProduceResponse partition1Single = producer.send("orders", 1, "p1-order-1");
+        ProduceResponse partition2Single = producer.send("orders", 2, "p2-order-1");
 
+        System.out.println("Produced to multiple partitions:");
+        System.out.println("partition0 -> baseOffset=" + partition0Batch.baseOffset() + ", lastOffset=" + partition0Batch.lastOffset());
+        System.out.println("partition1 -> baseOffset=" + partition1Single.baseOffset() + ", lastOffset=" + partition1Single.lastOffset());
+        System.out.println("partition2 -> baseOffset=" + partition2Single.baseOffset() + ", lastOffset=" + partition2Single.lastOffset());
 
-        Partition orderP0 = broker.getPartitions("orders").get(0);
-        Partition orderP1 = broker.getPartitions("orders").get(1);
-        Record r1 = orderP0.read(1);
-        Record r2 = orderP1.read(1);
+        FetchResponse fetchFromStart = broker.fetch(new FetchRequest("orders", 0, 1, 10, 0));
+        System.out.println("\nPartition 0 fetch from offset 1:");
+        printRecords(0, fetchFromStart.records());
 
+        FetchResponse fetchFromOffset = broker.fetch(new FetchRequest("orders", 0, 2, 10, 0));
+        System.out.println("\nPartition 0 fetch from offset 2:");
+        printRecords(0, fetchFromOffset.records());
 
-        System.out.println("orders p0 offset 1 => " + new String(r1.payload));
-        System.out.println("orders p1 offset 1 => " + new String(r2.payload));
+        System.out.println("\nFetch partition 1 and partition 2 to verify old multi-partition behavior:");
+        printRecords(1, broker.fetch(new FetchRequest("orders", 1, 1, 10, 0)).records());
+        printRecords(2, broker.fetch(new FetchRequest("orders", 2, 1, 10, 0)).records());
 
-        Partition eventP0 = broker.getPartitions("events").get(0);
-        Partition eventP1 = broker.getPartitions("events").get(1);
-        Record r3 = eventP0.read(1);
-        Record r4 = eventP1.read(1);
+        for (int partition = 0; partition < 3; partition++) {
+            ListOffsetsResponse earliest = broker.listOffsets(
+                    new ListOffsetsRequest("orders", partition, ListOffsetsRequest.OffsetSpec.EARLIEST)
+            );
+            ListOffsetsResponse latest = broker.listOffsets(
+                    new ListOffsetsRequest("orders", partition, ListOffsetsRequest.OffsetSpec.LATEST)
+            );
+            System.out.println(
+                    "\nOffsets for partition " + partition + ": earliest=" + earliest.offset() + ", latest=" + latest.offset()
+            );
+        }
 
+        Thread delayedProducer = new Thread(() -> {
+            try {
+                Thread.sleep(700);
+                producer.send("orders", 1, "p1-order-late");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
 
-        System.out.println("events p0 offset 1 => " + new String(r3.payload));
-        System.out.println("events p1 offset 1 => " + new String(r4.payload));
+        delayedProducer.start();
+        long partition1Latest = broker.listOffsets(
+                new ListOffsetsRequest("orders", 1, ListOffsetsRequest.OffsetSpec.LATEST)
+        ).offset();
+        System.out.println("\nLong poll waiting for partition 1 offset " + (partition1Latest + 1) + "...");
+        FetchResponse longPoll = broker.fetch(new FetchRequest("orders", 1, partition1Latest + 1, 10, 3_000));
+        delayedProducer.join();
+        printRecords(1, longPoll.records());
 
+        Consumer consumer = new Consumer(broker, "orders", List.of(0, 1, 2));
+        System.out.println("\nConsumer poll across all partitions:");
+        consumer.poll(10);
 
-        RecordBatch batch = new RecordBatch(-1, List.of(
-                new Record(-1, System.currentTimeMillis(), "batch msg1".getBytes()),
-                new Record(-1, System.currentTimeMillis(), "batch msg2".getBytes()),
-                new Record(-1, System.currentTimeMillis(), "batch msg3".getBytes())
-        ));
+        Broker recoveredBroker = new Broker(dataRoot);
+        System.out.println("\nRecovery check after broker restart:");
+        for (int partition = 0; partition < 3; partition++) {
+            FetchResponse recovered = recoveredBroker.fetch(new FetchRequest("orders", partition, 1, 20, 0));
+            printRecords(partition, recovered.records());
+        }
+    }
 
-        long orderBatchLastOffset = orderP0.append(batch);
-        System.out.println("orders p0 batch last offset => " + orderBatchLastOffset);
-
-        Record orderBatchR1 = orderP0.read(2);
-        Record orderBatchR2 = orderP0.read(3);
-        Record orderBatchR3 = orderP0.read(4);
-        System.out.println("orders p0 offset 2 => " + new String(orderBatchR1.payload));
-        System.out.println("orders p0 offset 3 => " + new String(orderBatchR2.payload));
-        System.out.println("orders p0 offset 4 => " + new String(orderBatchR3.payload));
-
-        long eventBatchLastOffset = eventP0.append(batch);
-        System.out.println("events p0 batch last offset => " + eventBatchLastOffset);
-
-        Record eventBatchR1 = eventP0.read(2);
-        Record eventBatchR2 = eventP0.read(3);
-        Record eventBatchR3 = eventP0.read(4);
-        System.out.println("events p0 offset 2 => " + new String(eventBatchR1.payload));
-        System.out.println("events p0 offset 3 => " + new String(eventBatchR2.payload));
-        System.out.println("events p0 offset 4 => " + new String(eventBatchR3.payload));
-
-
-//        Consumer consumer1 = new Consumer("orders", new ArrayList<>());
-//        Consumer consumer2 = new Consumer("orders", new ArrayList<>());
-//        Consumer consumer3 = new Consumer("orders", new ArrayList<>());
-//
-//        List<Consumer> consumers = Arrays.asList(consumer1, consumer2, consumer3);
-//        ConsumerGroup group = new ConsumerGroup("order-group1",consumers,null);
-//
-//        List<Partition> ordersPartitions = broker.getPartitions("orders");
-//        group.setPartitionAssignment(ordersPartitions);
-//
-//        consumer1.poll(10);
-//        consumer2.poll(10);
-//        consumer3.poll(10);
-
-
-
+    private static void printRecords(int partition, List<Record> records) {
+        for (Record record : records) {
+            System.out.println(
+                    "partition=" + partition +
+                            ", offset=" + record.offset +
+                            ", payload=" + new String(record.payload, StandardCharsets.UTF_8)
+            );
+        }
     }
 }
