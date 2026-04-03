@@ -1,53 +1,80 @@
 package com.krafta.consumer;
 
+import com.krafta.api.FetchRequest;
+import com.krafta.api.FetchResponse;
+import com.krafta.api.ListOffsetsRequest;
+import com.krafta.api.ListOffsetsResponse;
+import com.krafta.broker.Broker;
 import com.krafta.storage.Record;
-import com.krafta.storage.Partition;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 public class Consumer {
-    private String topic;
-    private List<Partition> partitionList;
-    private Map<Partition,Long> partitionoffset = new HashMap<>();
+    private final Broker broker;
+    private final String topic;
+    private final List<Integer> partitions;
+    private final Map<Integer, Long> partitionOffsets = new HashMap<>();
 
-    public Consumer(String topic, List<Partition> partitionList){
+    public Consumer(Broker broker, String topic, List<Integer> partitionList) throws Exception {
+        this.broker = broker;
         this.topic = topic;
-        this.partitionList = partitionList;
+        this.partitions = new ArrayList<>(partitionList);
 
-        for(Partition p:partitionList){
-            partitionoffset.put(p,1L);
+        for (int partition : partitionList) {
+            ListOffsetsResponse earliest = broker.listOffsets(
+                    new ListOffsetsRequest(topic, partition, ListOffsetsRequest.OffsetSpec.EARLIEST)
+            );
+            long startOffset = earliest.offset() == 0 ? 1L : earliest.offset();
+            partitionOffsets.put(partition, startOffset);
         }
     }
 
-    public void poll(int maxMessages) throws Exception{
-        for(Partition p :partitionList){
-            long curroffset = partitionoffset.get(p);
-            for(int i=0;i<maxMessages;i++){
-                try {
-                    Record msg = p.read(curroffset);
-                    if (msg == null) break;
+    public void poll(int maxMessages) throws Exception {
+        for (int partition : partitions) {
+            long currentOffset = partitionOffsets.getOrDefault(partition, 1L);
+            FetchResponse response = broker.fetch(new FetchRequest(topic, partition, currentOffset, maxMessages, 0));
 
-                    System.out.println("Consumed: " + "Partition" + p + "Offset" + curroffset + "->" + new String(msg.payload));
-                    curroffset++;
-                } catch (Exception e) {
-                    break;
-                }
+            for (Record msg : response.records()) {
+                System.out.println(
+                        "Consumed: topic=" + topic +
+                                ", partition=" + partition +
+                                ", offset=" + msg.offset +
+                                ", payload=" + new String(msg.payload, StandardCharsets.UTF_8)
+                );
+                currentOffset = msg.offset + 1;
             }
-            partitionoffset.put(p,curroffset);
+
+            partitionOffsets.put(partition, currentOffset);
         }
     }
-    public void addPartition(Partition p) {
-        if (!partitionList.contains(p)) {
-            partitionList.add(p);
-            partitionoffset.put(p, 1L);
+
+    public List<Record> pollPartition(int partition, int maxMessages, long maxWaitMs) throws Exception {
+        long currentOffset = partitionOffsets.getOrDefault(partition, 1L);
+        FetchResponse response = broker.fetch(new FetchRequest(topic, partition, currentOffset, maxMessages, maxWaitMs));
+        if (!response.records().isEmpty()) {
+            long nextOffset = response.records().get(response.records().size() - 1).offset + 1;
+            partitionOffsets.put(partition, nextOffset);
+        }
+        return response.records();
+    }
+
+    public void addPartition(int partition) throws Exception {
+        if (!partitions.contains(partition)) {
+            partitions.add(partition);
+            ListOffsetsResponse earliest = broker.listOffsets(
+                    new ListOffsetsRequest(topic, partition, ListOffsetsRequest.OffsetSpec.EARLIEST)
+            );
+            long startOffset = earliest.offset() == 0 ? 1L : earliest.offset();
+            partitionOffsets.put(partition, startOffset);
         }
     }
 
     public void clearAssignments() {
-        partitionList.clear();
-        partitionoffset.clear();
+        partitions.clear();
+        partitionOffsets.clear();
     }
-
 }
