@@ -6,6 +6,7 @@ import com.krafta.api.ListOffsetsRequest;
 import com.krafta.api.ListOffsetsResponse;
 import com.krafta.api.ProduceRequest;
 import com.krafta.api.ProduceResponse;
+import com.krafta.coord.ClusterCoordService;
 import com.krafta.exceptions.TopicAlreadyExistsException;
 import com.krafta.exceptions.TopicNotFoundException;
 import com.krafta.storage.Partition;
@@ -20,11 +21,13 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class Broker {
     private static final long DEFAULT_MAX_SEGMENT_BYTES = 1024 * 1024;
     private static final long DEFAULT_MAX_SEGMENT_AGE_MS = 24L * 60 * 60 * 1000;
     private static final long DEFAULT_RETENTION_MS = 7L * 24 * 60 * 60 * 1000;
+    private static final long DEFAULT_BROKER_SESSION_TIMEOUT_MS = 5_000;
 
     private final Map<String, List<Partition>> topics = new HashMap<>();
     private final Map<String, Integer> nextPartitionIndex = new HashMap<>();
@@ -32,6 +35,10 @@ public class Broker {
     private final long maxSegmentBytes;
     private final long maxSegmentAgeMs;
     private final long retentionMs;
+    private final ClusterCoordService clusterCoordService;
+    private final Integer brokerId;
+    private final String endpoint;
+    private final long brokerSessionTimeoutMs;
 
     public Broker() {
         this("../data");
@@ -42,14 +49,38 @@ public class Broker {
     }
 
     public Broker(String dataRoot, long maxSegmentBytes, long maxSegmentAgeMs, long retentionMs) {
+        this(dataRoot, maxSegmentBytes, maxSegmentAgeMs, retentionMs, null, null, null, DEFAULT_BROKER_SESSION_TIMEOUT_MS);
+    }
+
+    public Broker(
+            String dataRoot,
+            long maxSegmentBytes,
+            long maxSegmentAgeMs,
+            long retentionMs,
+            ClusterCoordService clusterCoordService,
+            Integer brokerId,
+            String endpoint,
+            long brokerSessionTimeoutMs
+    ) {
         this.dataRoot = dataRoot;
         this.maxSegmentBytes = maxSegmentBytes;
         this.maxSegmentAgeMs = maxSegmentAgeMs;
         this.retentionMs = retentionMs;
-        loadExistingTopics();
+        this.clusterCoordService = clusterCoordService;
+        this.brokerId = brokerId;
+        this.endpoint = endpoint;
+        this.brokerSessionTimeoutMs = brokerSessionTimeoutMs;
+        if (isClusterMode()) {
+            registerToCluster(System.currentTimeMillis());
+        } else {
+            loadExistingTopics();
+        }
     }
 
     public void createTopic(String topicName, int totalPartition) throws TopicAlreadyExistsException, IOException {
+        if (isClusterMode()) {
+            throw new IllegalStateException("Use createTopicInCluster() in cluster mode");
+        }
         if(totalPartition<=0){
             throw new IllegalArgumentException("Total partition must be greater than 0");
         }
@@ -69,6 +100,55 @@ public class Broker {
             Partition currpartition = new Partition(path, maxSegmentBytes, maxSegmentAgeMs, retentionMs);
             partitionList.add(currpartition);
         }
+        topics.put(topicName, partitionList);
+        nextPartitionIndex.put(topicName, 0);
+    }
+
+    public void createTopicInCluster(String topicName, int totalPartition) throws IOException {
+        if (!isClusterMode()) {
+            throw new IllegalStateException("Cluster coordinator is not configured");
+        }
+        if (totalPartition <= 0) {
+            throw new IllegalArgumentException("Total partition must be greater than 0");
+        }
+
+        try {
+            clusterCoordService.createTopicStaticPlacement(topicName, totalPartition);
+        } catch (IllegalArgumentException alreadyExists) {
+            // Topic metadata may already exist if another broker created it first.
+        }
+        syncTopicFromCluster(topicName);
+    }
+
+    public void syncTopicFromCluster(String topicName) throws IOException {
+        if (!isClusterMode()) {
+            throw new IllegalStateException("Cluster coordinator is not configured");
+        }
+        Optional<ClusterCoordService.TopicPlacement> placementOpt = clusterCoordService.topicPlacement(topicName);
+        if (placementOpt.isEmpty()) {
+            throw new IllegalStateException("Unknown topic in cluster metadata: " + topicName);
+        }
+
+        ClusterCoordService.TopicPlacement placement = placementOpt.get();
+        List<Partition> partitionList = new ArrayList<>(placement.partitionCount());
+        for (int i = 0; i < placement.partitionCount(); i++) {
+            partitionList.add(null);
+        }
+
+        File topicDir = new File(dataRoot, topicName);
+        if (!topicDir.exists() && !topicDir.mkdirs()) {
+            throw new IOException("Failed to create topic directory: " + topicDir.getPath());
+        }
+
+        for (Map.Entry<Integer, Integer> entry : placement.ownerByPartition().entrySet()) {
+            int partitionId = entry.getKey();
+            int ownerBrokerId = entry.getValue();
+            if (ownerBrokerId == brokerId) {
+                String path = dataRoot + "/" + topicName + "/partitions" + partitionId;
+                partitionList.set(partitionId, new Partition(path, maxSegmentBytes, maxSegmentAgeMs, retentionMs));
+            }
+        }
+
         topics.put(topicName, partitionList);
         nextPartitionIndex.put(topicName, 0);
     }
@@ -136,12 +216,44 @@ public class Broker {
         return getPartition(topic, partition).segmentCount();
     }
 
+    public void registerToCluster(long nowMs) {
+        if (!isClusterMode()) {
+            throw new IllegalStateException("Cluster coordinator is not configured");
+        }
+        clusterCoordService.registerBroker(brokerId, endpoint, brokerSessionTimeoutMs, nowMs);
+    }
+
+    public void heartbeatCluster(long nowMs) {
+        if (!isClusterMode()) {
+            throw new IllegalStateException("Cluster coordinator is not configured");
+        }
+        clusterCoordService.brokerHeartbeat(brokerId, nowMs);
+    }
+
+    public ClusterCoordService.ClusterMetadata clusterMetadata() {
+        if (!isClusterMode()) {
+            throw new IllegalStateException("Cluster coordinator is not configured");
+        }
+        return clusterCoordService.metadataSnapshot();
+    }
+
     private Partition getPartition(String topic, int partition) throws TopicNotFoundException {
         List<Partition> partitions = getPartitions(topic);
         if (partition < 0 || partition >= partitions.size()) {
             throw new IllegalArgumentException("Invalid partition: " + partition);
         }
-        return partitions.get(partition);
+
+        Partition local = partitions.get(partition);
+        if (local == null) {
+            if (isClusterMode()) {
+                int owner = clusterCoordService.ownerBroker(topic, partition);
+                throw new IllegalStateException(
+                        "Partition " + partition + " of topic " + topic + " is owned by broker " + owner
+                );
+            }
+            throw new IllegalStateException("Partition " + partition + " is not available locally");
+        }
+        return local;
     }
 
     private void loadExistingTopics() {
@@ -177,5 +289,9 @@ public class Broker {
                 nextPartitionIndex.put(topicDir.getName(), 0);
             }
         }
+    }
+
+    private boolean isClusterMode() {
+        return clusterCoordService != null && brokerId != null && endpoint != null;
     }
 }
