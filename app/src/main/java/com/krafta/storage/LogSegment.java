@@ -64,7 +64,7 @@ public class LogSegment {
         currOffset = newOffset;
         messageSinceLastIdx += batch.getRecords().size();
 
-        if (currOffset == batch.getRecords().size() || messageSinceLastIdx >= INDEX_INTERVAL) {
+        if (indexedOffsets.isEmpty() || messageSinceLastIdx >= INDEX_INTERVAL) {
             writeIdxEntry(currOffset, fileOffset);
             messageSinceLastIdx = 0;
         }
@@ -169,7 +169,7 @@ public class LogSegment {
                 recoveredOffset = Math.max(recoveredOffset, batchEndOffset);
                 recoveredMessagesSinceLastIndex += batch.getRecords().size();
 
-                if (batchEndOffset == batch.getRecords().size() || recoveredMessagesSinceLastIndex >= INDEX_INTERVAL) {
+                if (indexedOffsets.isEmpty() || recoveredMessagesSinceLastIndex >= INDEX_INTERVAL) {
                     writeIdxEntry(batchEndOffset, scanPos);
                     recoveredMessagesSinceLastIndex = 0;
                 }
@@ -181,7 +181,8 @@ public class LogSegment {
             }
         }
 
-        currOffset = recoveredOffset;
+        long floorOffset = baseOffset > 0 ? baseOffset - 1 : 0;
+        currOffset = Math.max(recoveredOffset, floorOffset);
         messageSinceLastIdx = recoveredMessagesSinceLastIndex;
     }
 
@@ -204,6 +205,10 @@ public class LogSegment {
 
     public synchronized long sizeBytes() throws IOException {
         return file.length();
+    }
+
+    public synchronized boolean isEmpty() throws IOException {
+        return file.length() == 0;
     }
 
     public long createdAtMs() {
