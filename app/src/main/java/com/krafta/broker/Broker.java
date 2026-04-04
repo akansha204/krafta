@@ -22,16 +22,30 @@ import java.util.List;
 import java.util.Map;
 
 public class Broker {
+    private static final long DEFAULT_MAX_SEGMENT_BYTES = 1024 * 1024;
+    private static final long DEFAULT_MAX_SEGMENT_AGE_MS = 24L * 60 * 60 * 1000;
+    private static final long DEFAULT_RETENTION_MS = 7L * 24 * 60 * 60 * 1000;
+
     private final Map<String, List<Partition>> topics = new HashMap<>();
     private final Map<String, Integer> nextPartitionIndex = new HashMap<>();
     private final String dataRoot;
+    private final long maxSegmentBytes;
+    private final long maxSegmentAgeMs;
+    private final long retentionMs;
 
     public Broker() {
         this("../data");
     }
 
     public Broker(String dataRoot) {
+        this(dataRoot, DEFAULT_MAX_SEGMENT_BYTES, DEFAULT_MAX_SEGMENT_AGE_MS, DEFAULT_RETENTION_MS);
+    }
+
+    public Broker(String dataRoot, long maxSegmentBytes, long maxSegmentAgeMs, long retentionMs) {
         this.dataRoot = dataRoot;
+        this.maxSegmentBytes = maxSegmentBytes;
+        this.maxSegmentAgeMs = maxSegmentAgeMs;
+        this.retentionMs = retentionMs;
         loadExistingTopics();
     }
 
@@ -52,7 +66,7 @@ public class Broker {
         List<Partition> partitionList = new ArrayList<>();
         for (int i = 0; i < totalPartition; i++) {
             String path = dataRoot + "/" + topicName + "/partitions" + i;
-            Partition currpartition = new Partition(path);
+            Partition currpartition = new Partition(path, maxSegmentBytes, maxSegmentAgeMs, retentionMs);
             partitionList.add(currpartition);
         }
         topics.put(topicName, partitionList);
@@ -60,18 +74,9 @@ public class Broker {
     }
 
     public long send(String topicName, String message) throws TopicNotFoundException, IOException {
-        if (!topics.containsKey(topicName)) {
-            throw new TopicNotFoundException("Topic not found");
-        }
-        List<Partition> partitionsList = topics.get(topicName);
-        int idx = nextPartitionIndex.get(topicName);
-
-        Partition partition = partitionsList.get(idx);
+        int idx = selectNextPartition(topicName);
+        Partition partition = getPartition(topicName, idx);
         long offset = partition.append(message);
-
-        int nextidx = (idx + 1) % partitionsList.size();
-        nextPartitionIndex.put(topicName, nextidx);
-
         return offset;
     }
 
@@ -110,6 +115,27 @@ public class Broker {
         return topics.get(topic);
     }
 
+    public int getPartitionCount(String topic) throws TopicNotFoundException {
+        return getPartitions(topic).size();
+    }
+
+    public int selectNextPartition(String topic) throws TopicNotFoundException {
+        List<Partition> partitionsList = getPartitions(topic);
+        int idx = nextPartitionIndex.getOrDefault(topic, 0);
+        int nextIdx = (idx + 1) % partitionsList.size();
+        nextPartitionIndex.put(topic, nextIdx);
+        return idx;
+    }
+
+    public int selectPartitionForKey(String topic, String key) throws TopicNotFoundException {
+        int partitionCount = getPartitionCount(topic);
+        return Math.floorMod(key.hashCode(), partitionCount);
+    }
+
+    public int getSegmentCount(String topic, int partition) throws TopicNotFoundException {
+        return getPartition(topic, partition).segmentCount();
+    }
+
     private Partition getPartition(String topic, int partition) throws TopicNotFoundException {
         List<Partition> partitions = getPartitions(topic);
         if (partition < 0 || partition >= partitions.size()) {
@@ -140,7 +166,7 @@ public class Broker {
             List<Partition> partitions = new ArrayList<>();
             for (File partitionDir : partitionDirs) {
                 try {
-                    partitions.add(new Partition(partitionDir.getPath()));
+                    partitions.add(new Partition(partitionDir.getPath(), maxSegmentBytes, maxSegmentAgeMs, retentionMs));
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to load partition: " + partitionDir.getPath(), e);
                 }
