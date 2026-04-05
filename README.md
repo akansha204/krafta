@@ -275,7 +275,6 @@ In this model:
 
 ## Benchmark Environment
 
-These values were collected from the current machine through shell commands:
 
 - OS: Ubuntu 24.04.4 LTS
 - Architecture: x86_64
@@ -348,3 +347,5 @@ Run the benchmark report:
 ```bash
 ./gradlew benchmark
 ```
+## LICENSE
+ MIT License.
