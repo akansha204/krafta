@@ -37,6 +37,13 @@ application {
     mainClass = 'com.krafta.App'
 }
 
+tasks.register('benchmark', JavaExec) {
+    group = 'application'
+    description = 'Runs the benchmark runner.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.krafta.bench.BenchmarkRunner'
+}
+
 tasks.named('test') {
     // Use JUnit Platform for unit tests.
     useJUnitPlatform()
