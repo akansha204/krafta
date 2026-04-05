@@ -3,106 +3,82 @@
  */
 package com.krafta;
 
-import com.krafta.api.FetchRequest;
 import com.krafta.api.FetchResponse;
 import com.krafta.api.ListOffsetsRequest;
 import com.krafta.api.ListOffsetsResponse;
-import com.krafta.api.ProduceRequest;
-import com.krafta.api.ProduceResponse;
 import com.krafta.broker.Broker;
-import com.krafta.consumer.Consumer;
-import com.krafta.producer.Producer;
-import com.krafta.storage.Record;
+import com.krafta.client.ClusterClient;
+import com.krafta.coord.ClusterCoordService;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class App {
+    private static final long SEVEN_DAYS_MS = 7L * 24 * 60 * 60 * 1000;
+    private static final long ONE_DAY_MS = 24L * 60 * 60 * 1000;
+    private static final String DATA_ROOT = "../data";
+    private static final String TOPIC = "orders";
 
     public static void main(String[] args) throws Exception {
-        String dataRoot = "../data";
-        Broker broker = new Broker(dataRoot);
-        Producer producer = new Producer(broker);
+        long now = System.currentTimeMillis();
 
-        try {
-            broker.createTopic("orders", 3);
-        } catch (Exception ignored) {
-        }
-
-        ProduceResponse partition0Batch = producer.sendBatch(
-                "orders",
-                0,
-                List.of("p0-order-1", "p0-order-2", "p0-order-3")
+        ClusterCoordService clusterCoord = new ClusterCoordService();
+        Broker broker1 = new Broker(
+                DATA_ROOT + "/broker-1", 1024 * 1024, ONE_DAY_MS, SEVEN_DAYS_MS,
+                clusterCoord, 1, "broker-1", 5_000
         );
-        ProduceResponse partition1Single = producer.send("orders", 1, "p1-order-1");
-        ProduceResponse partition2Single = producer.send("orders", 2, "p2-order-1");
+        Broker broker2 = new Broker(
+                DATA_ROOT + "/broker-2", 1024 * 1024, ONE_DAY_MS, SEVEN_DAYS_MS,
+                clusterCoord, 2, "broker-2", 5_000
+        );
+        Broker broker3 = new Broker(
+                DATA_ROOT + "/broker-3", 1024 * 1024, ONE_DAY_MS, SEVEN_DAYS_MS,
+                clusterCoord, 3, "broker-3", 5_000
+        );
 
-        System.out.println("Produced to multiple partitions:");
-        System.out.println("partition0 -> baseOffset=" + partition0Batch.baseOffset() + ", lastOffset=" + partition0Batch.lastOffset());
-        System.out.println("partition1 -> baseOffset=" + partition1Single.baseOffset() + ", lastOffset=" + partition1Single.lastOffset());
-        System.out.println("partition2 -> baseOffset=" + partition2Single.baseOffset() + ", lastOffset=" + partition2Single.lastOffset());
+        broker1.heartbeatCluster(now + 1); //alive brokers
+        broker2.heartbeatCluster(now + 1);
+        broker3.heartbeatCluster(now + 1);
 
-        FetchResponse fetchFromStart = broker.fetch(new FetchRequest("orders", 0, 1, 10, 0));
-        System.out.println("\nPartition 0 fetch from offset 1:");
-        printRecords(0, fetchFromStart.records());
+        broker1.createTopicInCluster(TOPIC, 6); //assigns partitions to brokers(round robin)
+        broker2.syncTopicFromCluster(TOPIC);
+        broker3.syncTopicFromCluster(TOPIC);
 
-        FetchResponse fetchFromOffset = broker.fetch(new FetchRequest("orders", 0, 2, 10, 0));
-        System.out.println("\nPartition 0 fetch from offset 2:");
-        printRecords(0, fetchFromOffset.records());
+        Map<Integer, Broker> brokerMap = new HashMap<>();
+        brokerMap.put(1, broker1);
+        brokerMap.put(2, broker2);
+        brokerMap.put(3, broker3);
+        ClusterClient client = new ClusterClient(clusterCoord, brokerMap);
 
-        System.out.println("\nFetch partition 1 and partition 2 to verify old multi-partition behavior:");
-        printRecords(1, broker.fetch(new FetchRequest("orders", 1, 1, 10, 0)).records());
-        printRecords(2, broker.fetch(new FetchRequest("orders", 2, 1, 10, 0)).records());
-
-        for (int partition = 0; partition < 3; partition++) {
-            ListOffsetsResponse earliest = broker.listOffsets(
-                    new ListOffsetsRequest("orders", partition, ListOffsetsRequest.OffsetSpec.EARLIEST)
-            );
-            ListOffsetsResponse latest = broker.listOffsets(
-                    new ListOffsetsRequest("orders", partition, ListOffsetsRequest.OffsetSpec.LATEST)
-            );
-            System.out.println(
-                    "\nOffsets for partition " + partition + ": earliest=" + earliest.offset() + ", latest=" + latest.offset()
-            );
+        System.out.println("Smoke test: static partition owners");
+        ClusterCoordService.TopicPlacement placement = clusterCoord.topicPlacement(TOPIC).orElseThrow();
+        for (int partition = 0; partition < placement.partitionCount(); partition++) {
+            System.out.println("partition=" + partition + " ownerBroker=" + placement.ownerByPartition().get(partition));
         }
 
-        Thread delayedProducer = new Thread(() -> {
-            try {
-                Thread.sleep(700);
-                producer.send("orders", 1, "p1-order-late");
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
-
-        delayedProducer.start();
-        long partition1Latest = broker.listOffsets(
-                new ListOffsetsRequest("orders", 1, ListOffsetsRequest.OffsetSpec.LATEST)
-        ).offset();
-        System.out.println("\nLong poll waiting for partition 1 offset " + (partition1Latest + 1) + "...");
-        FetchResponse longPoll = broker.fetch(new FetchRequest("orders", 1, partition1Latest + 1, 10, 3_000));
-        delayedProducer.join();
-        printRecords(1, longPoll.records());
-
-        Consumer consumer = new Consumer(broker, "orders", List.of(0, 1, 2));
-        System.out.println("\nConsumer poll across all partitions:");
-        consumer.poll(10);
-
-        Broker recoveredBroker = new Broker(dataRoot);
-        System.out.println("\nRecovery check after broker restart:");
-        for (int partition = 0; partition < 3; partition++) {
-            FetchResponse recovered = recoveredBroker.fetch(new FetchRequest("orders", partition, 1, 20, 0));
-            printRecords(partition, recovered.records());
+        for (int partition = 0; partition < placement.partitionCount(); partition++) {
+            String payload = "p" + partition + "-msg1";
+            client.produce(TOPIC, partition, payload.getBytes(StandardCharsets.UTF_8));
         }
-    }
+        client.refreshMetadata();
 
-    private static void printRecords(int partition, List<Record> records) {
-        for (Record record : records) {
-            System.out.println(
-                    "partition=" + partition +
-                            ", offset=" + record.offset +
-                            ", payload=" + new String(record.payload, StandardCharsets.UTF_8)
-            );
+        System.out.println("\nProducer owner routing check");
+        for (int partition = 0; partition < placement.partitionCount(); partition++) {
+            int owner = client.ownerBrokerId(TOPIC, partition);
+            ListOffsetsResponse latest = client.listOffsets(TOPIC, partition, ListOffsetsRequest.OffsetSpec.LATEST);
+            System.out.println("partition=" + partition + " routedToBroker=" + owner + " latestOffset=" + latest.offset());
+        }
+
+        System.out.println("\nConsumer fetch from owner brokers");
+        for (int partition = 0; partition < placement.partitionCount(); partition++) {
+            int owner = client.ownerBrokerId(TOPIC, partition);
+            FetchResponse response = client.fetch(TOPIC, partition, 1, 10, 0);
+            String value = response.records().isEmpty()
+                    ? "<empty>"
+                    : new String(response.records().get(0).payload, StandardCharsets.UTF_8);
+            System.out.println("partition=" + partition + " fetchedFromBroker=" + owner + " value=" + value);
         }
     }
 }
