@@ -22,6 +22,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Broker {
     private static final long DEFAULT_MAX_SEGMENT_BYTES = 1024 * 1024;
@@ -30,7 +32,8 @@ public class Broker {
     private static final long DEFAULT_BROKER_SESSION_TIMEOUT_MS = 5_000;
 
     private final Map<String, List<Partition>> topics = new HashMap<>();
-    private final Map<String, Integer> nextPartitionIndex = new HashMap<>();
+//    private final Map<String, Integer> nextPartitionIndex = new HashMap<>();
+    private final ConcurrentHashMap<String, AtomicInteger> nextPartitionIndex = new ConcurrentHashMap<>();
     private final String dataRoot;
     private final long maxSegmentBytes;
     private final long maxSegmentAgeMs;
@@ -101,7 +104,7 @@ public class Broker {
             partitionList.add(currpartition);
         }
         topics.put(topicName, partitionList);
-        nextPartitionIndex.put(topicName, 0);
+        nextPartitionIndex.put(topicName, new AtomicInteger(0));
     }
 
     public void createTopicInCluster(String topicName, int totalPartition) throws IOException {
@@ -150,7 +153,7 @@ public class Broker {
         }
 
         topics.put(topicName, partitionList);
-        nextPartitionIndex.put(topicName, 0);
+        nextPartitionIndex.put(topicName, new AtomicInteger(0));
     }
 
     public long send(String topicName, String message) throws TopicNotFoundException, IOException {
@@ -200,11 +203,10 @@ public class Broker {
     }
 
     public int selectNextPartition(String topic) throws TopicNotFoundException {
-        List<Partition> partitionsList = getPartitions(topic);
-        int idx = nextPartitionIndex.getOrDefault(topic, 0);
-        int nextIdx = (idx + 1) % partitionsList.size();
-        nextPartitionIndex.put(topic, nextIdx);
-        return idx;
+        int partitionCount = getPartitionCount(topic);
+        AtomicInteger cursor = nextPartitionIndex.computeIfAbsent(topic, t -> new AtomicInteger(0));
+        return Math.floorMod(cursor.getAndIncrement(), partitionCount);
+
     }
 
     public int selectPartitionForKey(String topic, String key) throws TopicNotFoundException {
@@ -286,7 +288,7 @@ public class Broker {
 
             if (!partitions.isEmpty()) {
                 topics.put(topicDir.getName(), partitions);
-                nextPartitionIndex.put(topicDir.getName(), 0);
+                nextPartitionIndex.put(topicDir.getName(), new AtomicInteger(0));
             }
         }
     }
